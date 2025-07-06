@@ -1,0 +1,864 @@
+this is the hierarchy of the app
+
+EOTReminder/
+│
+├── Assets/
+│   ├── background.jpg
+│   ├── clock.png
+│   ├── calendar.png
+│   ├── sandclock.png
+│   ├── alert10.wav
+│   └── alert3.wav
+│
+├── Models/
+│   └── TimeSlot.cs
+│
+├── ViewModels/
+│   └── MainViewModel.cs
+│
+├── Views/
+│   ├── MainWindow.xaml
+│   └── MainWindow.xaml.cs
+│
+├── Converters/
+│   └── BoolToBrushConverter.cs
+│
+├── DailyTimes.xlsx          ← Your Excel file with date/times
+│
+├── App.xaml
+├── App.xaml.cs
+├── EOTReminder.csproj       ← Your project file
+└── Resources.resx (optional if using embedded WAVs)
+
+
+// Converters/BoolToBrushConverter.cs
+
+using System;
+using System.Globalization;
+using System.Windows.Data;
+using System.Windows.Media;
+
+namespace EOTReminder.Converters
+{
+    public class BoolToBrushConverter : IValueConverter
+    {
+        public SolidColorBrush HighlightBrush { get; set; } = new SolidColorBrush(Color.FromRgb(255, 215, 0)); // Gold
+        public SolidColorBrush NormalBrush { get; set; } = new SolidColorBrush(Color.FromRgb(153, 153, 153)); // #999
+
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            return value is bool b && b ? HighlightBrush : NormalBrush;
+        }
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        {
+            throw new NotImplementedException();
+        }
+    }
+}
+
+
+// Models/TimeSlot.cs
+
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+
+namespace EOTReminder.Models
+{
+    public class TimeSlot : INotifyPropertyChanged
+    {
+        private string _description;
+        private bool _isPassed;
+        private string _countdownText;
+        private bool _showSandClock;
+        private bool _highlight;
+        private TimeSpan _countdown;
+        private bool _isIn30MinAlert;
+
+        public string Id { get; set; }
+        public DateTime Time { get; set; }
+
+        public Dictionary<string, bool> AlertFlags { get; set; } = new Dictionary<string, bool>()
+            {["30"] = false, ["10"] = false, ["3"] = false};
+
+        public string Description
+        {
+            get => _description;
+            set
+            {
+                _description = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool IsPassed
+        {
+            get => _isPassed;
+            set
+            {
+                _isPassed = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public string CountdownText
+        {
+            get => _countdownText;
+            set
+            {
+                _countdownText = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool ShowSandClock
+        {
+            get => _showSandClock;
+            set
+            {
+                _showSandClock = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool Highlight
+        {
+            get => _highlight;
+            set
+            {
+                _highlight = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public TimeSpan Countdown
+        {
+            get => _countdown;
+            set
+            {
+                _countdown = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public bool IsIn30MinAlert
+        {
+            get => _isIn30MinAlert;
+            set
+            {
+                _isIn30MinAlert = value;
+                OnPropertyChanged();
+            }
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+        private void OnPropertyChanged([CallerMemberName] string name = null) =>
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
+}
+
+
+
+// ViewModels/MainViewModel.cs - Full MVVM Features
+
+using EOTReminder.Models;
+using System;
+using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using System.Media;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Timers;
+using ExcelDataReader;
+using System.Collections.Generic;
+using System.Text;
+using System.Data;
+using System.Windows;
+
+namespace EOTReminder.ViewModels
+{
+    public class MainViewModel : INotifyPropertyChanged
+    {
+        public ObservableCollection<TimeSlot> TimeSlots { get; set; } = new ObservableCollection<TimeSlot> ();
+        public ObservableCollection<TimeSlot> TopSlots { get; } = new ObservableCollection<TimeSlot>();
+        public ObservableCollection<TimeSlot> BottomSlots { get; } = new  ObservableCollection<TimeSlot>();
+
+        private bool _isAlertActive;
+        public bool IsAlertActive
+        {
+            get => _isAlertActive;
+            set { _isAlertActive = value; OnPropertyChanged(); }
+        }
+
+        public string TodayDate => DateTime.Now.ToString("dd/MM/yyyy");
+        public string CurrentTime => DateTime.Now.ToString("HH:mm:ss");
+        public string HebrewDate => GetHebrewDate(DateTime.Now);
+        public string Sunrise { get; set; }
+        public string Midday { get; set; }
+        public string Sunset { get; set; }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        private Timer _timer;
+        private string _currentLang = "he";
+
+        private readonly Dictionary<string, Dictionary<string, string>> _translations =
+            new Dictionary<string, Dictionary<string, string>>()
+            {
+                ["en"] = new Dictionary<string, string>()
+                {
+                    ["EOS1"] = "End of Shema",
+                    ["EOS2"] = "End of Shema",
+                    ["EOT1"] = "End of Prayer",
+                    ["EOT2"] = "End of Prayer",
+                    ["Passed"] = "Passed"
+                },
+                ["he"] = new Dictionary<string, string>()
+                {
+                    ["EOS1"] = "סו\"ז קר\"ש מג\"א",
+                    ["EOS2"] = "סו\"ז קר\"ש תניא גר\"א",
+                    ["EOT1"] = "סו\"ז תפילה מג\"א",
+                    ["EOT2"] = "סו\"ז תפילה תניא גר\"א",
+                    ["passed"] = "עבר זמנו",
+                }
+            };
+
+        public MainViewModel()
+        {
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
+            LoadFromExcel();
+            InitTimer();
+        }
+        
+        private void InitTimer()
+        {
+            _timer = new Timer(1000);
+            _timer.Elapsed += (s, e) =>
+            {
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    foreach (var slot in TimeSlots)
+                    {
+                        // Force refresh the countdown
+                        slot.Countdown = slot.Time - DateTime.Now;
+
+                        if (!slot.IsPassed && slot.Countdown <= TimeSpan.Zero)
+                        {
+                            slot.Highlight = false;
+                            slot.IsPassed = true;
+                            slot.CountdownText = "";
+                            slot.ShowSandClock = false;
+                            slot.IsIn30MinAlert = false;
+                        }
+                        else if (!slot.IsPassed)
+                        {
+                            if (!slot.AlertFlags["30"] && slot.Countdown.TotalMinutes <= 30)
+                            {
+                                slot.CountdownText = string.Format("{0:D2}:{1:D2}",
+                                    (int) slot.Countdown.TotalMinutes,
+                                    slot.Countdown.Seconds);
+
+                                slot.IsIn30MinAlert = true;
+                                slot.Highlight = true;
+                                slot.ShowSandClock = true;
+                                slot.AlertFlags["30"] = true;
+                            }
+
+                            if (!slot.AlertFlags["10"] && slot.Countdown.TotalMinutes <= 10)
+                            {
+                                if (slot.Id == "EOS1" || slot.Id == "EOS2")
+                                    PlayAlert(slot.Id, "10");
+                                slot.AlertFlags["10"] = true;
+                            }
+
+                            if (!slot.AlertFlags["3"] && slot.Countdown.TotalMinutes <= 3)
+                            {
+                                if (slot.Id == "EOS1" || slot.Id == "EOS2")
+                                    PlayAlert(slot.Id, "3");
+                                slot.AlertFlags["3"] = true;
+                            }
+                        }
+                    }
+                    UpdateSlotCollections();
+                    OnPropertyChanged(nameof(CurrentTime));
+                    OnPropertyChanged(nameof(TimeSlots));
+                });
+
+            };
+            _timer.Start();
+        }
+
+        private void LoadFromExcel()
+        {
+            //string path = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DailyTimes.xlsx");
+            string path = @"C:\\DailyTimes.xlsx";
+            if (!File.Exists(path))
+            {
+                LoadMock();
+                return;
+            }
+
+            try
+            {
+                using (var stream = File.Open(path, FileMode.Open, FileAccess.Read))
+                using (var reader = ExcelReaderFactory.CreateReader(stream))
+                {
+                    var dataSet = reader.AsDataSet();
+                    var table = dataSet.Tables[0];
+                    var today = DateTime.Today;
+                    DateTime date;
+
+                    for (int i = 1; i < table.Rows.Count; i++)
+                    {
+                        var row = table.Rows[i];
+                        if (DateTime.TryParse(row[0]?.ToString(), out date) && date.Date == today)
+                        {
+                            AddSlot("EOS1", ParseTime(row[1].ToString()));
+                            AddSlot("EOS2", ParseTime(row[2].ToString()));
+                            AddSlot("EOT1", ParseTime(row[3].ToString()));
+                            AddSlot("EOT2", ParseTime(row[4].ToString()));
+
+                            Sunrise = ParseTime(row[5].ToString()).ToString("HH:mm:ss");
+                            Midday = ParseTime(row[6].ToString()).ToString("HH:mm:ss");
+                            Sunset = ParseTime(row[7].ToString()).ToString("HH:mm:ss");
+                            return; // Found today's row, stop looping
+                        }
+                    }
+                    //LoadMock();
+                }
+            }
+            catch
+            {
+                LoadMock();
+            }
+        }
+
+        private DateTime ParseTime(string input)
+        {
+            if (TimeSpan.TryParse(input, out var ts))
+                return DateTime.Today.Add(ts);
+            if (DateTime.TryParse(input, out var dt))
+                return DateTime.Today.Add(dt.TimeOfDay);
+            return DateTime.Now.AddMinutes(1);
+        }
+
+        private void LoadMock()
+        {
+            var now = DateTime.Now;
+            AddSlot("EOS1", now.AddMinutes(5));
+            AddSlot("EOS2", now.AddMinutes(10));
+            AddSlot("EOT1", now.AddMinutes(20));
+            AddSlot("EOT2", now.AddMinutes(30));
+
+            Sunrise = "06:00:00";
+            Midday = "12:00:00";
+            Sunset = "18:00:00";
+        }
+
+        private void AddSlot(string id, DateTime time)
+        {
+            TimeSlots.Add(new TimeSlot
+            {
+                Id = id,
+                Description = _translations[_currentLang][id],
+                Time = time,
+                IsPassed = false,
+                CountdownText = "",
+                ShowSandClock = false,
+                Highlight = false,
+            });
+        }
+
+        private void PlayAlert(string slotId, string minutesBefore)
+        {
+            // Build file name from inputs
+            string fileName = (slotId == "EOS1" || slotId == "EOS2")
+                ? $"alert{slotId}_{minutesBefore}.wav"
+                : $"alert{minutesBefore}.wav";
+
+            string externalPath = Path.Combine("C:\\HebrewAlerts", fileName);
+
+            try
+            {
+                if (File.Exists(externalPath))
+                {
+                    SoundPlayer player = new SoundPlayer(externalPath);
+                    player.Play();
+                    return;
+                }
+
+                var stream = Assembly.GetExecutingAssembly()
+                    .GetManifestResourceStream($"EOTReminder.Assets.{fileName}");
+
+                if (stream != null)
+                {
+                    SoundPlayer player = new SoundPlayer(stream);
+                    player.Play();
+                }
+            }
+            catch
+            {
+                // fail silently
+            }
+        }
+
+        private void UpdateSlotGroups()
+        {
+            var alerted = TimeSlots.FirstOrDefault(s => s.AlertFlags["30"] && !s.IsPassed);
+            TopSlots.Clear();
+            BottomSlots.Clear();
+
+            if (alerted != null)
+            {
+                TopSlots.Add(alerted);
+                foreach (var slot in TimeSlots.Where(s => s != alerted))
+                    BottomSlots.Add(slot);
+            }
+            else
+            {
+                foreach (var slot in TimeSlots)
+                    BottomSlots.Add(slot);
+            }
+
+            OnPropertyChanged(nameof(TopSlots));
+            OnPropertyChanged(nameof(BottomSlots));
+        }
+
+        private void UpdateAlertState()
+        {
+            var alerted = TimeSlots.FirstOrDefault(ts => ts.IsIn30MinAlert);
+            if (alerted != null)
+            {
+                IsAlertActive = true;
+                TopSlots.Clear();
+                BottomSlots.Clear();
+
+                TopSlots.Add(alerted);
+                foreach (var ts in TimeSlots.Where(t => t != alerted))
+                    BottomSlots.Add(ts);
+            }
+            else
+            {
+                IsAlertActive = false;
+                TopSlots.Clear();
+                BottomSlots.Clear();
+                // All go to normal list
+                // (If TimeSlots is your main list, just keep it full)
+            }
+        }
+
+        private void UpdateSlotCollections()
+        {
+            var alertSlot = TimeSlots.FirstOrDefault(slot => slot.IsIn30MinAlert);
+
+            TopSlots.Clear();
+            BottomSlots.Clear();
+
+            if (alertSlot != null)
+            {
+                TopSlots.Add(alertSlot);
+                foreach (var slot in TimeSlots.Where(s => s != alertSlot))
+                    BottomSlots.Add(slot);
+            }
+            else
+            {
+                // No alert, show all in BottomSlots for normal 2x2 grid
+                foreach (var slot in TimeSlots)
+                    BottomSlots.Add(slot);
+            }
+        }
+
+        private string GetHebrewDate(DateTime date)
+        {
+            return GetHebrewJewishDateString(date, false);
+            var hc = new HebrewCalendar();
+            int y = hc.GetYear(date);
+            int m = hc.GetMonth(date);
+            int d = hc.GetDayOfMonth(date);
+            bool isLeap = hc.IsLeapYear(y);
+
+            string[] months =
+            {
+                "", "ניסן", "אייר", "סיון", "תמוז", "אב", "אלול",
+                "תשרי", "חשון", "כסלו", "טבת", "שבט", "אדר", "אדר ב׳"
+            };
+
+            string monthName = (m == 13) ? months[13] :
+                (m == 12 && !isLeap) ? months[12] : months[m];
+
+            return $"{d} {monthName} {y}";
+        }
+
+        public string GetHebrewJewishDateString(DateTime anyDate, bool addDayOfWeek)
+        {
+            StringBuilder stringBuilder = new StringBuilder();
+            CultureInfo cultureInfo = CultureInfo.CreateSpecificCulture("he-IL");
+            cultureInfo.DateTimeFormat.Calendar = new HebrewCalendar();
+            if (addDayOfWeek)
+            {
+                stringBuilder.Append(anyDate.ToString("dddd", cultureInfo) + " ");
+            }
+            stringBuilder.Append(anyDate.ToString("dd", cultureInfo) + " ");
+            stringBuilder.Append(anyDate.ToString("y", cultureInfo) ?? "");
+            return stringBuilder.ToString();
+        }
+
+        public void SwitchLanguage(string lang)
+        {
+            _currentLang = lang;
+            foreach (var slot in TimeSlots)
+            {
+                if (_translations[lang].TryGetValue(slot.Id, out var trans))
+                    slot.Description = trans;
+            }
+            OnPropertyChanged(nameof(TimeSlots));
+        }
+
+        private void OnPropertyChanged([CallerMemberName] string name = null) =>
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+    }
+}
+
+<!-- Views/MainWindow.xaml -->
+<Window x:Class="EOTReminder.Views.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:vm="clr-namespace:EOTReminder.ViewModels"
+        xmlns:local="clr-namespace:EOTReminder.Views"
+        mc:Ignorable="d"
+        Title="Zmanim Reminder"
+        Width="950" Height="650"
+        Background="Transparent"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+        <Style x:Key="TimeBoxStyle" TargetType="Border">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="CornerRadius" Value="15"/>
+            <Setter Property="Padding" Value="10"/>
+            <Setter Property="Margin" Value="8"/>
+            <Setter Property="Opacity" Value="0.8"/>
+            <Setter Property="BorderBrush" Value="#999"/>
+            <Setter Property="BorderThickness" Value="5"/>
+            <Setter Property="Effect">
+                <Setter.Value>
+                    <DropShadowEffect Color="Black" BlurRadius="5" ShadowDepth="2" Opacity="0.3"/>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Style for big highlighted EO -->
+        <Style x:Key="BigTimeBoxStyle" TargetType="Border" BasedOn="{StaticResource TimeBoxStyle}">
+            <Setter Property="Padding" Value="20"/>
+            <Setter Property="Margin" Value="12"/>
+            <Setter Property="BorderThickness" Value="6"/>
+            <!--Setter Property="FontSize" Value="20"/-->
+        </Style>
+    </Window.Resources>
+
+    <Window.DataContext>
+        <vm:MainViewModel />
+    </Window.DataContext>
+
+    <Grid>
+        <!-- Background -->
+        <Grid.Background>
+            <ImageBrush ImageSource="/Assets/background.jpg" Stretch="UniformToFill"/>
+        </Grid.Background>
+
+        <Grid.RowDefinitions>
+            <RowDefinition Height="1.25*"/>
+            <RowDefinition Height="7.5*"/>
+            <RowDefinition Height="1.25*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <Border Grid.Row="0" Background="#F0F0F0" Padding="3">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Orientation="Vertical" HorizontalAlignment="Center">
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="נץ החמה" FontSize="12"/>
+                    </Viewbox>
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="{Binding Sunrise}" FontSize="12"/>
+                    </Viewbox>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Vertical" HorizontalAlignment="Center">
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="חצות" FontSize="12"/>
+                    </Viewbox>
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="{Binding Midday}" FontSize="12"/>
+                    </Viewbox>
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Vertical" HorizontalAlignment="Center">
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="שקיעה" FontSize="12"/>
+                    </Viewbox>
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="{Binding Sunset}" FontSize="12"/>
+                    </Viewbox>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Main Content -->
+        <Grid Grid.Row="1" Margin="10">
+            <!-- Normal 2x2 grid - visible only if no alert -->
+            <ItemsControl ItemsSource="{Binding TimeSlots}" Visibility="{Binding IsAlertActive, Converter={StaticResource BoolToVisibility}, ConverterParameter=False}">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <UniformGrid Columns="2" Rows="2"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Style="{StaticResource TimeBoxStyle}" BorderBrush="{Binding Highlight, Converter={StaticResource BoolToBrushConverter}}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                                    <Viewbox MaxHeight="36">
+                                        <TextBlock Text="{Binding Description}" FontSize="14" FontWeight="Bold" TextAlignment="Center"/>
+                                    </Viewbox>
+                                    <Viewbox MaxHeight="36">
+                                        <TextBlock Text="{Binding Time, StringFormat='HH:mm:ss'}" FontSize="24" TextAlignment="Center"/>
+                                    </Viewbox>
+                                    <Viewbox MaxHeight="24">
+                                        <TextBlock Text="Passed"
+                                                   Foreground="Red"
+                                                   FontWeight="Bold"
+                                                   Visibility="{Binding IsPassed, Converter={StaticResource BoolToVisibility}}"
+                                                   TextAlignment="Center"/>
+                                    </Viewbox>
+                                </StackPanel>
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+
+            <!-- Alert mode - split top and bottom rows -->
+            <Grid Visibility="{Binding IsAlertActive, Converter={StaticResource BoolToVisibility}}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="1.5*"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <!-- Top big EO -->
+                <ItemsControl ItemsSource="{Binding TopSlot}" Grid.Row="0">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <UniformGrid Columns="1" Rows="1"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Style="{StaticResource BigTimeBoxStyle}" BorderBrush="{Binding Highlight, Converter={StaticResource BoolToBrushConverter}}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Viewbox MaxHeight="60">
+                                        <Image Grid.Column="0"
+                                               Source="/Assets/sandclock.png"
+                                               Margin="10"
+                                               VerticalAlignment="Center"
+                                               Visibility="{Binding ShowSandClock, Converter={StaticResource BoolToVisibility}}"
+                                               Stretch="Uniform"/>
+                                    </Viewbox>
+                                    <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                                        <Viewbox MaxHeight="48">
+                                            <TextBlock Text="{Binding Description}" FontSize="18" FontWeight="Bold" TextAlignment="Center"/>
+                                        </Viewbox>
+                                        <Viewbox MaxHeight="48">
+                                            <TextBlock Text="{Binding Time, StringFormat='HH:mm:ss'}" FontSize="36" TextAlignment="Center"/>
+                                        </Viewbox>
+                                        <Viewbox MaxHeight="48">
+                                            <TextBlock Text="{Binding CountdownText, Mode=OneWay}" FontSize="24" Foreground="Red" TextAlignment="Center"/>
+                                        </Viewbox>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <!-- Bottom smaller EOs -->
+                <ItemsControl ItemsSource="{Binding BottomSlots}" Grid.Row="1">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <UniformGrid Columns="3" Rows="1"/>
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border Style="{StaticResource TimeBoxStyle}" BorderBrush="{Binding Highlight, Converter={StaticResource BoolToBrushConverter}}">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="1" HorizontalAlignment="Center">
+                                        <Viewbox MaxHeight="36">
+                                            <TextBlock Text="{Binding Description}" FontSize="14" FontWeight="Bold" TextAlignment="Center"/>
+                                        </Viewbox>
+                                        <Viewbox MaxHeight="36">
+                                            <TextBlock Text="{Binding Time, StringFormat='HH:mm:ss'}" FontSize="24" TextAlignment="Center"/>
+                                        </Viewbox>
+                                        <Viewbox MaxHeight="24">
+                                            <TextBlock Text="Passed"
+                                                       Foreground="Red"
+                                                       FontWeight="Bold"
+                                                       Visibility="{Binding IsPassed, Converter={StaticResource BoolToVisibility}}"
+                                                       TextAlignment="Center"/>
+                                        </Viewbox>
+                                    </StackPanel>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Grid>
+        </Grid>
+
+        <!-- Footer -->
+        <Border Grid.Row="2" Background="#F0F0F0" Padding="10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Center">
+                    <Viewbox MaxHeight="36">
+                        <Image Source="/Assets/calendar.png" Width="30" Height="30" Margin="5" Stretch="Uniform"/>
+                    </Viewbox>
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="{Binding TodayDate}" FontSize="18" FontWeight="SemiBold"/>
+                    </Viewbox>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center">
+                    <Viewbox MaxHeight="36">
+                        <Image Source="/Assets/clock.png" Width="30" Height="30" Margin="5" Stretch="Uniform"/>
+                    </Viewbox>
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="{Binding CurrentTime}" FontSize="18" FontWeight="SemiBold" />
+                    </Viewbox>
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Center">
+                    <Viewbox MaxHeight="36">
+                        <Image Source="/Assets/calendar.png" Width="30" Height="30" Margin="5" Stretch="Uniform"/>
+                    </Viewbox>
+                    <Viewbox MaxHeight="36">
+                        <TextBlock Text="{Binding HebrewDate}" FontSize="18" FontWeight="SemiBold"/>
+                    </Viewbox>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
+
+
+// Views/MainWindow.xaml.cs
+
+using System.Windows;
+using System.Windows.Controls;
+using EOTReminder.ViewModels;
+
+namespace EOTReminder.Views
+{
+    public partial class MainWindow : Window
+    {
+        private MainViewModel _viewModel => DataContext as MainViewModel;
+
+        public MainWindow()
+        {
+            InitializeComponent();
+        }
+
+        // Optional: Language switcher handler if you add ComboBox in XAML later
+        private void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (e.AddedItems[0] is ComboBoxItem selected)
+            {
+                string lang = selected.Tag?.ToString();
+                if (!string.IsNullOrWhiteSpace(lang))
+                    _viewModel?.SwitchLanguage(lang);
+            }
+        }
+    }
+}
+
+// App.xaml
+
+<Application x:Class="EOTReminder.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:EOTReminder"
+             xmlns:conv="clr-namespace:EOTReminder.Converters"
+             StartupUri="Views/MainWindow.xaml">
+    <Application.Resources>
+        <conv:BoolToBrushConverter x:Key="BoolToBrushConverter"/>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility"/>
+
+        <!-- Define Font Families -->
+        <FontFamily x:Key="AlphaRegular">pack://application:,,,/Fonts/#Alpha Regular</FontFamily>
+        <FontFamily x:Key="AlphaBold">pack://application:,,,/Fonts/#Alpha Bold</FontFamily>
+
+        <!-- Default TextBlock style (regular) -->
+        <Style TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource AlphaRegular}" />
+        </Style>
+
+        <!-- Optional: Bold style for special use -->
+        <Style x:Key="BoldTextBlock" TargetType="TextBlock">
+            <Setter Property="FontFamily" Value="{StaticResource AlphaBold}" />
+            <Setter Property="FontWeight" Value="Bold"/>
+        </Style>
+
+    </Application.Resources>
+</Application>
+
+// App.xaml.cs
+
+using System;
+using System.Collections.Generic;
+using System.Configuration;
+using System.Data;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows;
+
+namespace EOTReminder
+{
+    /// <summary>
+    /// Interaction logic for App.xaml
+    /// </summary>
+    public partial class App : Application
+    {
+    }
+}
+
+
+
+
+
+
